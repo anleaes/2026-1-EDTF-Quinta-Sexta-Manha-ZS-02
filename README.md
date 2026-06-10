@@ -1,1 +1,0 @@
-# 2026-1-EDTF-Quinta-Sexta-Manha-ZS-02
