@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { ai } from '../../services/geminiService';
 import { db } from '../../services/supabaseClient';
 import { Camera, MapPin, Sparkles, Check, ChevronLeft, Upload, RefreshCw, Eye } from 'lucide-react';
@@ -24,6 +24,18 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
   const videoRef = useRef(null);
   const [cameraActive, setCameraActive] = useState(false);
   const streamRef = useRef(null);
+
+  // --- Executa IA automaticamente quando a foto é capturada ---
+  useEffect(() => {
+    if (photo && !aiResult && !aiLoading) {
+      runAITriage();
+    }
+  }, [photo]);
+
+  // --- Captura GPS automaticamente ao abrir o formulário ---
+  useEffect(() => {
+    handleGPSCapture();
+  }, []);
 
   // --- RNF05: Compressão de Imagem Client-Side ---
   const compressImage = (imageFile) => {
@@ -91,13 +103,11 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    setLocLoading(true); // Obtém GPS ao subir imagem se possível
-    handleGPSCapture();
 
     try {
       const compressed = await compressImage(file);
       setPhoto(compressed);
-      setAiResult(null); // Reseta a IA anterior
+      setAiResult(null); // Reseta a IA anterior para que o useEffect rode a nova triagem
     } catch (err) {
       setErrorMsg('Erro ao processar imagem.');
     }
@@ -136,12 +146,10 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
     // Comprime
     const compressed = canvas.toDataURL('image/jpeg', 0.8);
     setPhoto(compressed);
+    setAiResult(null); // Reset para que useEffect rode a triagem
     
     // Desliga câmera
     stopCamera();
-    
-    // Auto-captura GPS
-    handleGPSCapture();
   };
 
   const stopCamera = () => {
@@ -218,19 +226,35 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
     setSubmitLoading(true);
     setErrorMsg('');
 
+    // Se a IA ainda não rodou, roda agora antes de enviar
+    let finalAiResult = aiResult;
+    if (!finalAiResult) {
+      try {
+        finalAiResult = await ai.analyzeUrbanIncident(photo);
+        setAiResult(finalAiResult);
+        setCategory(finalAiResult.category);
+        setSeverity(finalAiResult.severity);
+      } catch (err) {
+        console.warn('IA falhou no submit, usando valores manuais:', err);
+        finalAiResult = {
+          category,
+          severity,
+          sanitized: true,
+          summary: description || 'Problema urbano reportado manualmente.',
+          is_simulated: true,
+          simulated_reason: 'IA indisponível no momento do envio'
+        };
+      }
+    }
+
     const payload = {
       photoUrl: photo, // Enviamos em Base64 no modo Demo ou link no Supabase real
-      description,
+      description: description || finalAiResult?.summary || 'Problema urbano reportado.',
       latitude,
       longitude,
-      category,
-      severity,
-      aiAnalysis: aiResult || {
-        category,
-        severity,
-        sanitized: true,
-        summary: description || 'Problema urbano reportado manualmente.'
-      }
+      category: finalAiResult?.category || category,
+      severity: finalAiResult?.severity || severity,
+      aiAnalysis: finalAiResult
     };
 
     const { data, error } = await db.submitReport(payload);
@@ -245,7 +269,7 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
   };
 
   return (
-    <div className="scrollable-y" style={{ width: '100%', padding: '20px' }}>
+    <div className="scrollable-y" style={{ width: '100%', padding: '20px', paddingTop: 'max(env(safe-area-inset-top, 0px), 20px)' }}>
       
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
@@ -300,8 +324,16 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
             <div style={{ position: 'relative', width: '100%', borderRadius: '12px', overflow: 'hidden', aspectRatio: '4/3', border: '1px solid var(--border-color)' }}>
               <img src={photo} alt="Incidente" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               
+              {/* Loading da IA */}
+              {aiLoading && (
+                <div style={{ position: 'absolute', inset: 0, background: 'rgba(0, 0, 0, 0.6)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
+                  <RefreshCw size={32} className="spinner" style={{ color: 'var(--cyan)' }} />
+                  <span style={{ color: '#fff', fontSize: '0.85rem', fontWeight: '600' }}>IA analisando imagem...</span>
+                </div>
+              )}
+
               {/* Efeito de Bounding Box da IA Gemini se analisada */}
-              {aiResult && (
+              {aiResult && !aiLoading && (
                 <div style={{ position: 'absolute', top: '15%', left: '15%', right: '15%', bottom: '25%', border: '2px dashed var(--cyan)', boxShadow: '0 0 15px rgba(0, 242, 254, 0.3)', borderRadius: '8px', pointerEvents: 'none', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: '8px' }}>
                   <span style={{ fontSize: '0.65rem', background: 'var(--cyan)', color: '#060913', padding: '2px 6px', borderRadius: '4px', alignSelf: 'flex-start', fontFamily: 'var(--font-title)', fontWeight: '800', textTransform: 'uppercase' }}>
                     {category} - Severidade {severity}/10
@@ -316,7 +348,7 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
 
               <button 
                 type="button" 
-                onClick={() => setPhoto(null)} 
+                onClick={() => { setPhoto(null); setAiResult(null); }} 
                 className="btn-secondary" 
                 style={{ position: 'absolute', top: '12px', right: '12px', padding: '6px 12px', fontSize: '0.75rem', background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }}
               >
@@ -363,7 +395,8 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
               <input 
                 ref={fileInputRef}
                 type="file" 
-                accept="image/*" 
+                accept="image/*"
+                capture="environment"
                 onChange={handleFileChange} 
                 style={{ display: 'none' }} 
               />
@@ -398,35 +431,15 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
           </button>
         </div>
 
-        {/* Botão Processar IA (Apenas se tiver foto) */}
-        {photo && !aiResult && (
-          <button 
-            type="button" 
-            onClick={runAITriage} 
-            disabled={aiLoading}
-            className="btn-primary" 
-            style={{ width: '100%', background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', boxShadow: '0 4px 15px rgba(124, 58, 237, 0.2)' }}
-          >
-            {aiLoading ? (
-              <>
-                <RefreshCw size={18} className="spinner" style={{ borderTopColor: '#fff' }} />
-                <span>IA Analisando Imagem...</span>
-              </>
-            ) : (
-              <>
-                <Sparkles size={18} />
-                <span>Triagem Automática por IA (Gemini)</span>
-              </>
-            )}
-          </button>
-        )}
-
         {/* Resultados da IA visíveis / Editáveis */}
         {aiResult && (
           <div className="glass-card" style={{ borderLeft: '3px solid var(--cyan)', background: 'rgba(0, 242, 254, 0.03)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '12px' }}>
               <Sparkles size={16} className="text-cyan" />
-              <h4 style={{ fontSize: '0.85rem', textTransform: 'uppercase', color: 'var(--cyan)' }}>Triagem Gerada pela IA</h4>
+              <h4 style={{ fontSize: '0.85rem', textTransform: 'uppercase', color: 'var(--cyan)' }}>
+                Triagem Gerada pela IA
+                {aiResult.is_simulated && <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginLeft: '8px', textTransform: 'none' }}>(simulada)</span>}
+              </h4>
             </div>
 
             <div className="form-group">
@@ -459,6 +472,20 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
           </div>
         )}
 
+        {/* Botão Re-rodar IA se a IA já tiver rodado e o usuário quiser */}
+        {photo && aiResult && (
+          <button 
+            type="button" 
+            onClick={() => { setAiResult(null); runAITriage(); }}
+            disabled={aiLoading}
+            className="btn-secondary" 
+            style={{ width: '100%', borderColor: 'rgba(124, 58, 237, 0.35)', color: '#a855f7' }}
+          >
+            <RefreshCw size={16} />
+            Re-analisar com IA
+          </button>
+        )}
+
         {/* Descrição */}
         <div className="form-group">
           <label className="form-label" htmlFor="description">Descrição Adicional / Detalhes</label>
@@ -477,8 +504,8 @@ export default function ReportForm({ onCancel, onSubmitSuccess }) {
         <button 
           type="submit" 
           className="btn-primary" 
-          disabled={submitLoading || !photo || !latitude}
-          style={{ width: '100%', marginTop: '8px' }}
+          disabled={submitLoading || !photo || !latitude || aiLoading}
+          style={{ width: '100%', marginTop: '8px', marginBottom: '80px' }}
         >
           {submitLoading ? <div className="spinner" style={{ width: '20px', height: '20px', borderTopColor: '#000' }} /> : (
             <>

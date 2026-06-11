@@ -39,7 +39,57 @@ export function calculateDistance(lat1: number, lon1: number, lat2: number, lon2
   return distance;
 }
 
-// RF13: Função de geocodificação reversa simulada baseada em pontos de referência de SP
+// RF13: Geocodificação reversa usando Nominatim (OpenStreetMap) - gratuito e sem chave
+export async function getRealAddress(lat: number, lon: number): Promise<string> {
+  try {
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`,
+      {
+        headers: {
+          'Accept-Language': 'pt-BR',
+          'User-Agent': 'UrbanGuard-SmartCity/1.0'
+        }
+      }
+    );
+    
+    if (!response.ok) throw new Error('Nominatim API error');
+    
+    const data = await response.json();
+    
+    if (data && data.address) {
+      const addr = data.address;
+      const parts: string[] = [];
+      
+      // Monta endereço completo brasileiro
+      const road = addr.road || addr.pedestrian || addr.footway || '';
+      if (road) parts.push(road);
+      if (addr.house_number) parts.push(addr.house_number);
+      
+      const neighborhood = addr.suburb || addr.neighbourhood || addr.quarter || '';
+      if (neighborhood) parts.push(neighborhood);
+      
+      const city = addr.city || addr.town || addr.village || addr.municipality || '';
+      if (city) parts.push(city);
+      
+      const state = addr.state || '';
+      if (state) parts.push(state);
+      
+      if (parts.length > 0) {
+        return parts.join(', ');
+      }
+      
+      // Fallback para display_name se a montagem manual falhar
+      return data.display_name || getSimulatedAddress(lat, lon);
+    }
+    
+    return getSimulatedAddress(lat, lon);
+  } catch (err) {
+    console.warn('Nominatim falhou, usando geocodificação simulada:', err);
+    return getSimulatedAddress(lat, lon);
+  }
+}
+
+// Fallback: Função de geocodificação simulada baseada em pontos de referência de SP
 export function getSimulatedAddress(lat: number, lon: number): string {
   const distanceTo = (tLat: number, tLon: number) => calculateDistance(lat, lon, tLat, tLon);
 
@@ -429,7 +479,7 @@ class DatabaseClient {
         }
       }
     } else {
-      const mockAddress = getSimulatedAddress(latitude, longitude);
+      const realAddress = await getRealAddress(latitude, longitude);
 
       if (this.isDemo) {
         const newIncidentId = 'inc-' + Math.random().toString(36).substr(2, 9);
@@ -437,7 +487,7 @@ class DatabaseClient {
           id: newIncidentId,
           latitude,
           longitude,
-          address: mockAddress,
+          address: realAddress,
           category,
           status: 'aberto',
           severity_score: severity,
@@ -473,7 +523,7 @@ class DatabaseClient {
             .insert([{
               latitude,
               longitude,
-              address: mockAddress,
+              address: realAddress,
               category,
               status: 'aberto',
               severity_score: severity,
